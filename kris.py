@@ -103,8 +103,10 @@ def {nm}(context, snowflake: SnowflakeResource,) -> None:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Convert VaultSpeed FMC files to Dagster Asset files')
     parser.add_argument('fmc_path', nargs='?', default='./dagster/vaultspeed/FMC', help='Path to FMC files directory (default: ./dagster/vaultspeed/FMC)')
+    parser.add_argument('--output-path', default='./dagster', help='Base output path for Dagster files (default: ./dagster)')
     args = parser.parse_args()
     fmc_path = args.fmc_path
+    output_path = args.output_path
 
     asstfls = {'INIT':{'FL':[],'BV':[]},'INCR':{'FL':[],'BV':[]}}
     # Create list of info files to process
@@ -173,7 +175,7 @@ csval = os.environ.get('CSVAL', 'False')
         for asst in assts:
             pyfl += f"{asst.asst}\n"
 
-        flnm = f'./dagster/{prjnm}/assets/{grpnm}.py'
+        flnm = f'{output_path}/{prjnm}/assets/{grpnm}.py'
         #flnm = f'{grpnm}.py'
         with open(flnm, "w") as pyFile:
             pyFile.write(pyfl)
@@ -191,11 +193,11 @@ csval = os.environ.get('CSVAL', 'False')
                 asstf = asstd['group']
                 fast = asstd['assets'][len(asstd['assets'])-1]
                 fnlast = fast.name
-                with open(f'./dagster/{prjnm}/jobs/__init__.py', 'r') as initf:
+                with open(f'{output_path}/{prjnm}/jobs/__init__.py', 'r') as initf:
                     rws = initf.readlines()
                 
                 # Write out updated init file
-                with open(f'./dagster/{prjnm}/jobs/__init__.py', 'w') as initf:
+                with open(f'{output_path}/{prjnm}/jobs/__init__.py', 'w') as initf:
                     jbdfs = 0
                     jbdfsf = 0
                     for line in range(len(rws)):
@@ -265,11 +267,11 @@ csval = os.environ.get('CSVAL', 'False')
             initn = asstd['initn']
             njb = f'{asstf}_job'
             fjb = f'{asstf}_failure'
-            with open(f'./dagster/{prjnm}/sensors/__init__.py', 'r') as initf:
+            with open(f'{output_path}/{prjnm}/sensors/__init__.py', 'r') as initf:
                 rws = initf.readlines()
 
             # Write out updated init file
-            with open(f'./dagster/{prjnm}/sensors/__init__.py', 'w') as initf:
+            with open(f'{output_path}/{prjnm}/sensors/__init__.py', 'w') as initf:
                 jbvar = 0
                 jbff = 0
                 jbbf = 0
@@ -327,13 +329,13 @@ csval = os.environ.get('CSVAL', 'False')
     schl = ''
     for sch in schs:
         schl+=f"{sch['group']}_schedule,"
-        with open(f'./dagster/{prjnm}/schedules/__init__.py', 'r') as initf:
+        with open(f'{output_path}/{prjnm}/schedules/__init__.py', 'r') as initf:
             rws = initf.readlines()
 
         # Write out updated init file
         fndsch = 0
         imptf = 0
-        with open(f'./dagster/{prjnm}/schedules/__init__.py', 'w') as initf:
+        with open(f'{output_path}/{prjnm}/schedules/__init__.py', 'w') as initf:
             for line in range(len(rws)):
                 if '..jobs import' in rws[line]:
                     if rws[line].find(f"{sch['group']}_job") == -1: #look for current job
@@ -365,11 +367,11 @@ csval = os.environ.get('CSVAL', 'False')
             for asstd in asstfls[ldtyp][fltyp]:
                 asstf = asstd['group']
                 #Read project init file to ensure asset is defined in
-                with open(f'./dagster/{prjnm}/__init__.py', 'r') as initf:
+                with open(f'{output_path}/{prjnm}/__init__.py', 'r') as initf:
                     rws = initf.readlines()
 
                 # Write out updated init file
-                with open(f'./dagster/{prjnm}/__init__.py', 'w') as initf:
+                with open(f'{output_path}/{prjnm}/__init__.py', 'w') as initf:
                     astvar = False
                     for line in range(len(rws)):
                         if 'from .assets import ' in rws[line] and asstf not in rws[line]: # Ensure asset is pulled in as object
