@@ -1,0 +1,94 @@
+name: Convert FMC files to Dagster Project
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: Project Name
+        required: true
+        type: string
+        default: DataWranglers
+      STDLDT:
+        description: Start Date as Load Date
+        required: true
+        type: string
+        default: 'True'
+      ScheduleTimezone:
+        description: Schedule Timezone
+        required: true
+        type: string
+        default: 'America/New_York'
+      FMCN:
+        description: Custom FMC Schema
+        required: true
+        type: string
+        default: 'False'
+      VERSN:
+        description: Converter Version
+        required: true
+        type: string
+        default: 'latest'
+      LoadType:
+        description: Load Type Filter (INIT, INCR, or ALL)
+        required: true
+        type: choice
+        options:
+          - ALL
+          - INIT
+          - INCR
+        default: 'ALL'
+
+concurrency:
+  # Cancel in-progress deploys to same branch
+  group: ${{ github.ref }}/conv_FMC
+  cancel-in-progress: true
+
+permissions:
+    contents: write
+
+jobs:
+  Extract:
+    name: "Generate Dagster project files from VaultSpeed FMC files and load into Dagster Instance"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Pull ECR image
+        run: |
+          docker pull ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPO }}:${{ github.event.inputs.VERSN }}
+  
+      - name: Run Docker container
+        run: |
+          docker run --rm -v .:/dagster/ -e BVEX=${{ vars.BV_EXCLUDE }} -e PROJECT_NAME=${{ github.event.inputs.project }} -e FMCN=${{ github.event.inputs.FMCN }} -e STLD=${{ github.event.inputs.STDLDT }} -e TZN=${{ github.event.inputs.ScheduleTimezone }} --name kris_container ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPO }}:${{ github.event.inputs.VERSN }} --load-type ${{ github.event.inputs.LoadType }}
+
+        # Check for Changes
+      - name: Check for modified files
+        id: git-check
+        run: |
+          echo "modified=$(if [ -n "$(git status --porcelain)" ]; then echo "true"; else echo "false"; fi)" >> $GITHUB_OUTPUT
+
+      # Check in Changes
+      - name: Update changes in GitHub repository
+        if: steps.git-check.outputs.modified == 'true'
+        run:  |
+          git config --global user.name github-actions
+          git config --global user.email github-actions@github.com
+          git add .
+          git commit -am "Generating Dagster Project from VaultSpeed FMC"
+          git fetch origin
+          git rebase origin/${GITHUB_REF#refs/heads/}
+          git push origin ${GITHUB_REF#refs/heads/}
+

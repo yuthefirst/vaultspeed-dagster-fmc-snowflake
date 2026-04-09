@@ -1,0 +1,8 @@
+pytz
+dagster
+dagster-cloud
+dagster-snowflake-pandas
+snowflake-connector-python
+requests
+openpyxl
+msal

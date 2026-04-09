@@ -1,0 +1,99 @@
+# Setup Sequencer workflow to enable the correct generation of the loading table ID number
+# Written by Kevin Lambeth
+
+name: Configure Snowflake for deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      startid:
+        description: Starting Load ID
+        required: true
+        type: number
+        default: 1
+      incrval:
+        description: Increment By
+        required: true
+        type: number
+        default: 1
+
+concurrency:
+  # Cancel in-progress deploys to same branch
+  group: ${{ github.ref }}/configureSF
+  cancel-in-progress: true
+
+jobs:
+  Configure:
+    name: "Generate Dagster project files from VaultSpeed FMC files"
+    runs-on: ubuntu-latest
+
+    steps:
+        - name: Install SnowCLI
+          run: |
+            python3 --version
+            python3 -m venv ~/my_env
+            source ~/my_env/bin/activate
+            python3 -m pip install snowflake-cli-labs
+            snow --install-completion 
+            echo "Setting Connection Parameters"
+            chown $USER ~/.config/snowflake/config.toml
+            chmod 0600 ~/.config/snowflake/config.toml
+            echo "[connections.DEPLOYMENT]" >> ~/.config/snowflake/config.toml
+            SFLKACCNT=${{ vars.SNOWFLAKE_ACCOUNT }}
+            echo "account = \"${SFLKACCNT//./-}\"" >> ~/.config/snowflake/config.toml
+            echo "user = \"${{ vars.SNOWFLAKE_USER }}\"" >> ~/.config/snowflake/config.toml
+            echo "password = \"${{ secrets.SNOWFLAKE_PASSWORD }}\"" >> ~/.config/snowflake/config.toml
+            echo "warehouse = \"${{ vars.SNOWFLAKE_WAREHOUSE }}\"" >> ~/.config/snowflake/config.toml
+            echo "database = \"${{ vars.SNOWFLAKE_DATABASE }}\"" >> ~/.config/snowflake/config.toml
+            echo "schema = \"PUBLIC\"" >> ~/.config/snowflake/config.toml
+            snow connection set-default "DEPLOYMENT"
+            echo "Snow CLI Configured and ready to connect to Snowflake using the variables passed in"
+
+        - name: Manage Snowflake Sequence
+          env:
+            START_ID: ${{ github.event.inputs.startid }}
+            INCR_VAL: ${{ github.event.inputs.incrval }}
+            SCHEMA_NAME: "DATAWRANGLERS"
+            SEQ_NAME: "FMC_LOAD_ID"
+          run: |
+            source ~/my_env/bin/activate
+            # Check if the schema exists
+            SCHEMA_EXISTS=$(snow sql -q "SHOW SCHEMAS LIKE '$SCHEMA_NAME';" --format JSON | jq -r '.[] | select(has("name") and .name == "DATAWRANGLERS") | length')
+            echo "Schema Query Found: $SCHEMA_EXISTS"
+    
+            if [[ -z "$SCHEMA_EXISTS" ]]; then
+                echo "Schema $SCHEMA_NAME not found, creating schema." >> $GITHUB_STEP_SUMMARY
+                snow sql -q "CREATE SCHEMA $SCHEMA_NAME;"
+            else
+                echo "Schema $SCHEMA_NAME already exists. Evaluating the sequence" >> $GITHUB_STEP_SUMMARY
+            fi
+    
+            # Check if the sequence exists
+            sqncjsn=$(snow sql -q "USE SCHEMA DATAWRANGLERS; SHOW SEQUENCES LIKE 'FMC_LOAD_ID';" --format JSON)
+            SEQUENCE_EXISTS=$(echo "$sqncjsn" | jq -r '.[1][] | select(has("name") and .name == "FMC_LOAD_ID") | length')
+            echo "Sequency Query Found: $SEQUENCE_EXISTS"
+    
+            if [[ -z "$SCHEMA_EXISTS" ]]; then
+                # Sequence doesn't exist, create it
+                echo "Sequence $SEQ_NAME not found, creating it with start value $START_ID and increment $INCR_VAL." >> $GITHUB_STEP_SUMMARY
+                snow sql -q "CREATE SEQUENCE $SCHEMA_NAME.$SEQ_NAME START = $START_ID INCREMENT = $INCR_VAL ORDER;"
+            else
+                # Sequence exists, get the next value
+                NEXT_VAL=$(echo "$sqncjsn" | jq -r '.[1][] | select(has("name") and .name == "FMC_LOAD_ID") | .next_value')
+                ITR_VAL=$(echo "$sqncjsn" | jq -r '.[1][] | select(has("name") and .name == "FMC_LOAD_ID") | .interval')
+                echo "Next_Val: $NEXT_VAL - Start_ID: $START_ID" >> $GITHUB_STEP_SUMMARY
+        
+                if [[ "$NEXT_VAL" -gt "$START_ID" && "$ITR_VAL" -ne "$INCR_VAL" ]]; then
+                    echo "::error:: Next Value ($NEXT_VAL) is greater than the entered start value ($START_ID). Please update your start value to keep from corrupting the load table if you need to update your sequencer."
+
+                elif [[ "$NEXT_VAL" -eq "$START_ID" && "$ITR_VAL" -eq "$INCR_VAL" ]]; then
+                    echo "The Sequencer is currently configured correctly." >> $GITHUB_STEP_SUMMARY
+
+                elif [[ "$NEXT_VAL" -gt "$START_ID" && "1" -eq "$START_ID" && "$ITR_VAL" -eq "$INCR_VAL" ]]; then
+                    echo "The Sequencer was configured correctly previously and this action does not need to be run again. If you need to make a change, ensure your start value is above $NEXT_VAL." >> $GITHUB_STEP_SUMMARY
+
+                else
+                    echo "Creating sequence with start value $START_ID and increment $INCR_VAL." >> $GITHUB_STEP_SUMMARY
+                    snow sql -q "CREATE OR REPLACE SEQUENCE $SCHEMA_NAME.$SEQ_NAME START = $START_ID INCREMENT = $INCR_VAL ORDER;"
+                fi
+            fi
