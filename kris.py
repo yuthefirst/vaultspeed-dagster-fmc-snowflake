@@ -8,14 +8,13 @@ Converts VaultSpeed FMC files, deployed to GitHub, to Dagster Asset.py files in 
 
 import os
 import json
-import pytz
 import ast
 import argparse
 
 prjnm = os.environ.get('PROJECT_NAME', 'DataWranglers') # Project Name
 strtlddt = os.environ.get('STLD', 'False') # Use Mapping Info Start Date as Load Date
 fmcnmo = os.environ.get('FMCN', 'False') # Allowing customized naming of FMC
-tmzn = os.environ.get('TZN', 'UTC') # Use Mapping Info Start Date as Load Date
+tmzn = os.environ.get('TZN', 'America/New_York') # Use Mapping Info Start Date as Load Date
 bvignr = os.environ.get('BVEX', '[]') # BV Jobs to Ignore for sensor triggering
 
 def normalize_env_list(raw):
@@ -100,13 +99,70 @@ def {nm}(context, snowflake: SnowflakeResource,) -> None:
     context.log.info("Stored procedure {nm} executed successfully.")\n"""
         self.name = nm
 
+def ensure_project_structure(output_path, prjnm):
+    for d in [f'{output_path}/{prjnm}/assets',
+              f'{output_path}/{prjnm}/jobs',
+              f'{output_path}/{prjnm}/sensors',
+              f'{output_path}/{prjnm}/schedules']:
+        os.makedirs(d, exist_ok=True)
+
+    jobs_init = f'{output_path}/{prjnm}/jobs/__init__.py'
+    if not os.path.exists(jobs_init):
+        with open(jobs_init, 'w') as f:
+            f.write('from dagster import define_asset_job, AssetSelection\n')
+
+    sensors_init = f'{output_path}/{prjnm}/sensors/__init__.py'
+    if not os.path.exists(sensors_init):
+        with open(sensors_init, 'w') as f:
+            f.write('from dagster import sensor, run_status_sensor, RunStatusSensorContext, RunRequest, DagsterRunStatus, AssetKey\n')
+            f.write('from ..jobs import \n\n')
+            f.write('@sensor(jobs=[])\n')
+            f.write('def incr_bv_generator(context):\n')
+            f.write('    jobs_to_monitor = []\n')
+            f.write('    bvjb = None\n')
+            f.write('    exclst = []\n')
+
+    schedules_init = f'{output_path}/{prjnm}/schedules/__init__.py'
+    if not os.path.exists(schedules_init):
+        with open(schedules_init, 'w') as f:
+            f.write('from dagster import ScheduleDefinition\n')
+            f.write('from ..jobs import \n')
+
+    prj_init = f'{output_path}/{prjnm}/__init__.py'
+    if not os.path.exists(prj_init):
+        with open(prj_init, 'w') as f:
+            f.write('from dagster import Definitions, load_assets_from_modules\n')
+            f.write('from .assets import \n')
+            f.write('from .jobs import \n')
+            f.write('from .schedules import \n')
+            f.write('from .sensors import \n\n')
+            f.write('all_jobs=[]\n')
+            f.write('all_schedules=[]\n')
+            f.write('all_sensors=[]\n')
+            f.write('\n')
+            f.write('defs = Definitions(assets=[],jobs=all_jobs,schedules=all_schedules,sensors=all_sensors,)\n')
+
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Convert VaultSpeed FMC files to Dagster Asset files')
+    parser = argparse.ArgumentParser(
+        description='Convert VaultSpeed FMC files to Dagster Asset files',
+        epilog=(
+            'Environment variables:\n'
+            '  PROJECT_NAME   Dagster project name (default: DataWranglers)\n'
+            '  TZN            Schedule execution timezone (default: America/New_York)\n'
+            '  DEFAULT_CRON   Default cron when schedule_interval is empty (default: 0 3 * * *)\n'
+            '  STLD           Use FMC start_date as load date, true/false (default: False)\n'
+            '  FMCN           Custom FMC name override (default: False)\n'
+            '  BVEX           BV jobs to exclude from sensor triggering, JSON list (default: [])\n'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument('fmc_path', nargs='?', default='./dagster/vaultspeed/FMC', help='Path to FMC files directory (default: ./dagster/vaultspeed/FMC)')
     parser.add_argument('--output-path', default='./dagster', help='Base output path for Dagster files (default: ./dagster)')
     args = parser.parse_args()
     fmc_path = args.fmc_path
     output_path = args.output_path
+    ensure_project_structure(output_path, prjnm)
 
     asstfls = {'INIT':{'FL':[],'BV':[]},'INCR':{'FL':[],'BV':[]}}
     # Create list of info files to process
@@ -123,8 +179,8 @@ if __name__ == '__main__':
         #grpnm = fmcInfo['flow_type'].lower() + '_' + fmcInfo['load_type'].lower() + '_' + fmcInfo['src_name'].lower()
         # To match VaultSpeed paradigm
         grpnm = fmcInfo['dag_name'].lower()
-        if fmcInfo['schedule_interval']:
-            schs.append({'group':grpnm,'sch':fmcInfo['schedule_interval']})
+        sch_interval = fmcInfo['schedule_interval'] if fmcInfo['schedule_interval'] else os.environ.get('DEFAULT_CRON', '0 3 * * *')
+        schs.append({'group':grpnm,'sch':sch_interval})
 
         # Load Mapping File
         try:
@@ -138,6 +194,14 @@ if __name__ == '__main__':
             with open(f"{fmc_path}/{prcn}{fmcInfo['dag_name']}.json", 'r') as mapFile:
                 fmcMap = json.load(mapFile)
         print(f"Opened Mapping File")
+
+        # Normalize new list-based format (layered) to the expected flat dict format
+        if isinstance(fmcMap, list):
+            fmcMap = {
+                m['map']: {**m, 'dependencies': []}
+                for layer in fmcMap
+                for m in layer['mappings']
+            }
 
         # Iterate through mappings to generate Asset objects for building the file
         assts = []
@@ -257,6 +321,10 @@ csval = os.environ.get('CSVAL', 'False')
     # Create Sensors
     snsrl = "incr_bv_generator,"
     for ldtyp in asstfls:
+        bvjn = None
+        bvfj = None
+        bvo = None
+        skp = normalize_env_list(bvignr)
         for bvo in asstfls[ldtyp]['BV']:
             bvjn = bvo['group'] + '_job'
             bvfj = bvo['group'] + '_failure'
@@ -285,7 +353,7 @@ csval = os.environ.get('CSVAL', 'False')
                     elif 'jobs_to_monitor = [' in rws[line] and jbsdi not in rws[line]: # Make sure incremental jobs populated in job list
                         initf.write(f'    jobs_to_monitor = [{jbsdi}]\n')
                         print('Updating jobs for incremental bv generator in sensors job list')
-                    elif 'bvjb = ' in rws[line] and bvjn not in rws[line]:          # Make sure BV Generator job is defined correctly
+                    elif 'bvjb = ' in rws[line] and bvjn is not None and bvjn not in rws[line]:          # Make sure BV Generator job is defined correctly
                         initf.write(f'    bvjb = {bvjn}\n')
                         print('Updating BV Job name for sensor ignore')
                     elif 'exclst = ' in rws[line] and not all(s in rws[line] for s in skp):          # Make sure BV Generator job is defined with skipped jobs
@@ -295,7 +363,7 @@ csval = os.environ.get('CSVAL', 'False')
                         jbff = 1
                         snsrl += f'update_{asstf}_status_failure,'
                         initf.write(rws[line])
-                    elif 'run_status=DagsterRunStatus.FAILURE' in rws[line] and bvjn in rws[line]: # Check for bv failure job sensor
+                    elif 'run_status=DagsterRunStatus.FAILURE' in rws[line] and bvjn is not None and bvjn in rws[line]: # Check for bv failure job sensor
                         jbbf = 1
                         initf.write(rws[line])
                         if snsrl.find(f"update_{bvo['group']}_status_failure,") < 0:
@@ -312,7 +380,7 @@ csval = os.environ.get('CSVAL', 'False')
                     initf.write('\tlatest = latest_meta.value\n')
                     initf.write('\treturn RunRequest(run_key=f"fail-load-{latest}",run_config={"ops": {"testFailProc": {"config": {"last": latest}}}})\n')
                     snsrl += f'update_{asstf}_status_failure,'
-                if jbbf == 0: # Write BV Load failure if it doesn't exist
+                if jbbf == 0 and bvjn is not None: # Write BV Load failure if it doesn't exist
                     initf.write(f'\n@run_status_sensor(run_status=DagsterRunStatus.FAILURE,monitored_jobs=[{bvjn}],request_job={bvfj},)\n')
                     initf.write(f"def update_{bvo['group']}_status_failure(context: RunStatusSensorContext):\n")
                     initf.write(f'\tevent = context.instance.get_latest_materialization_event(asset_key=AssetKey(["{initn}"]))\n')
@@ -355,11 +423,27 @@ csval = os.environ.get('CSVAL', 'False')
             if imptf == 0:
                 initf.write(f"from ..jobs import {sch['group']}_job\n")
             if fndsch == 0:
-                if tmzn != 'UTC':
-                    initf.write(f'''{sch['group']}_schedule = ScheduleDefinition(job={sch['group']}_job,cron_schedule="{sch['sch']}", execution_timezone="{tmzn}",)\n\n''')
-                else:
-                    initf.write(f'''{sch['group']}_schedule = ScheduleDefinition(job={sch['group']}_job,cron_schedule="{sch['sch']}",)\n\n''')
+                initf.write(f'''{sch['group']}_schedule = ScheduleDefinition(job={sch['group']}_job,cron_schedule="{sch['sch']}",execution_timezone="{tmzn}",)\n\n''')
     schl = schl[:-1]
+
+    # Always ensure schedules file has job imports for all jobs
+    with open(f'{output_path}/{prjnm}/schedules/__init__.py', 'r') as initf:
+        rws = initf.readlines()
+    with open(f'{output_path}/{prjnm}/schedules/__init__.py', 'w') as initf:
+        imptf = 0
+        for line in range(len(rws)):
+            if '..jobs import' in rws[line]:
+                imptf = 1
+                if jbsd not in rws[line]:
+                    initf.write(f'from ..jobs import {jbsd}\n')
+                    print('Updating schedules job imports')
+                else:
+                    initf.write(rws[line])
+            else:
+                initf.write(rws[line])
+        if imptf == 0 and jbsd:
+            initf.write(f'from ..jobs import {jbsd}\n')
+            print('Adding schedules job imports')
 
     # Define project level resources
     for ldtyp in asstfls:
